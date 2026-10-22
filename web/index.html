@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>唤醒灯 · 最小系统</title>
+  <style>
+    :root{color-scheme:light;--ink:#302d28;--muted:#726d65;--line:#e4ded4;--accent:#a24e24}
+    *{box-sizing:border-box}body{margin:0;background:#f7f4ee;color:var(--ink);font:16px/1.6 system-ui,"Microsoft YaHei",sans-serif}
+    main{max-width:940px;margin:40px auto;padding:0 22px}h1{font-size:30px;margin:5px 0}h2{font-size:19px;margin:0 0 15px}
+    .eyebrow{letter-spacing:2px;font-size:12px;color:var(--accent)}.muted,small{color:var(--muted)}
+    .panel{background:#fffdf9;border:1px solid var(--line);border-radius:18px;padding:24px;margin-top:20px}
+    .grid{display:grid;grid-template-columns:1.1fr 1fr;gap:20px}.grid .panel{height:100%}
+    label{display:block;margin:12px 0 5px;font-size:14px}input{width:100%;padding:10px 12px;border:1px solid #cfc8bc;border-radius:8px;font:inherit;background:white;color:var(--ink)}
+    .row{display:flex;gap:12px}.row>div{flex:1}button{padding:11px 16px;font:inherit;border:1px solid var(--line);border-radius:9px;background:#fff;cursor:pointer;margin-top:15px;color:var(--ink)}
+    button.primary{background:var(--accent);border-color:var(--accent);color:white}button:disabled{opacity:.5;cursor:wait}
+    .status{min-height:26px;color:var(--muted);margin-top:14px}.error{color:#aa2828}.led{width:58px;height:58px;border-radius:50%;background:#e7e0d4;border:1px solid #cfc5b6;flex-shrink:0}
+    .device{display:flex;align-items:center;gap:16px;padding:17px 0;border-bottom:1px solid var(--line)}.device:last-child{border:0}.device strong{font-size:16px}.device p{margin:3px 0;font-size:14px}
+    .badge{font-size:11px;border:1px solid var(--line);border-radius:5px;padding:2px 6px;margin-left:6px}.metrics{font-size:23px;font-weight:650;margin:8px 0}
+    #activePlan{white-space:pre-line;font-size:14px}a{color:var(--accent)}code{font-size:13px;word-break:break-all}footer{margin:35px 0;font-size:13px}
+    @media(max-width:700px){main{margin:24px auto}.grid{display:block}.row{gap:9px}.panel{padding:19px}h1{font-size:25px}}
+  </style>
+</head>
+<body><main>
+  <div class="eyebrow">SMART LAMP / SOFTWARE MVP</div>
+  <h1>先让第一颗 LED 按时亮起来。</h1>
+  <p class="muted">电脑后台 → 保存计划 → 设备确认 → 本地渐亮。模拟器与实物分别显示。</p>
+  <section class="panel" id="loginPanel">
+    <h2>连接本地后台</h2>
+    <p class="muted">从项目的 <code>config.local.json</code> 复制 <code>admin_token</code>。令牌只保存在当前浏览器会话。</p>
+    <label for="token">访问令牌</label><input id="token" type="password" autocomplete="off" placeholder="粘贴 admin_token">
+    <button class="primary" id="connect">连接</button>
+  </section>
+  <div class="grid">
+    <section class="panel">
+      <h2>下一次唤醒</h2>
+      <form id="planForm">
+        <label for="wake">起床时间（按当前浏览器当地时间）</label><input id="wake" type="datetime-local" step="1" required>
+        <div class="row"><div><label for="ramp">渐亮秒数</label><input id="ramp" type="number" min="1" max="2700" value="20" required></div><div><label for="hold">满亮保持秒数</label><input id="hold" type="number" min="1" max="3600" value="10" required></div></div>
+        <label for="peak">峰值亮度 %</label><input id="peak" type="number" min="1" max="100" value="100" required>
+        <button class="primary" type="submit">保存 / 修改</button>
+        <button type="button" id="quick">30 秒快速演示</button>
+        <button type="button" id="cancel">取消本次</button>
+      </form>
+      <div id="activePlan" class="muted">尚未读取计划。</div>
+    </section>
+    <section class="panel">
+      <h2>设备与保存结果</h2>
+      <div id="summary" class="metrics">等待连接</div>
+      <small>“已保存”表示落盘确认；“就绪”还需要在线且时间有效。</small>
+      <div id="devices"></div>
+    </section>
+  </div>
+  <div class="status" id="message" role="status" aria-live="polite"></div>
+  <footer class="muted">当前阶段：一盏测试 LED、单次计划、局域网 HTTP。没有 RTC 的设备重启后需要重新校时。新闻、电池和低功耗见后续开发阶段。</footer>
+</main>
+<script>
+'use strict';
+let accessToken = sessionStorage.getItem('lamp-token') || '';
+let current = null, busy = false, formDirty = false, formVersion = -1;
+const $ = id => document.getElementById(id);
+const labels = {needs_time:'等待校时',idle:'空闲',armed:'等待渐亮',ramping:'渐亮中',holding:'满亮保持',done:'本次结束',fault:'故障'};
+function message(text, error=false){$('message').textContent=text;$('message').classList.toggle('error',error);}
+async function api(path, options={}){
+  if(!accessToken)throw new Error('请先填写访问令牌并连接。');
+  const response=await fetch(path,{...options,headers:{'Content-Type':'application/json','Authorization':'Bearer '+accessToken,...options.headers}});
+  const data=await response.json();
+  if(!response.ok)throw new Error(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail));
+  return data;
+}
+function formatTime(ms){return ms?new Date(ms).toLocaleString():'';}
+function localField(date){const d=new Date(date.getTime()-date.getTimezoneOffset()*60000);return d.toISOString().slice(0,19);}
+function render(state){
+  current=state.snapshot;
+  if(current.enabled&&!formDirty&&formVersion!==current.version){
+    $('wake').value=localField(new Date(current.wake_at_ms));
+    $('ramp').value=(current.wake_at_ms-current.ramp_start_ms)/1000;
+    $('hold').value=(current.hold_until_ms-current.wake_at_ms)/1000;
+    $('peak').value=current.peak_percent;
+    formVersion=current.version;
+  }
+  $('summary').textContent=`实物保存 ${state.hardware_saved}/${state.hardware_target} · 就绪 ${state.hardware_ready}/${state.hardware_target}`;
+  const list=$('devices');list.replaceChildren();
+  for(const device of state.devices){
+    const row=document.createElement('div');row.className='device';
+    const led=document.createElement('div');led.className='led';
+    const brightness=device.online?Number(device.brightness||0):0;
+    led.style.background=`rgb(${Math.round(231+brightness*.24)},${Math.round(224+brightness*.08)},${Math.round(212-brightness*.72)})`;
+    led.style.boxShadow=brightness>0?`0 0 ${brightness*.4}px rgba(255,185,65,${brightness/150})`:'none';
+    const info=document.createElement('div'), title=document.createElement('strong');title.textContent=device.device_id;
+    const badge=document.createElement('span');badge.className='badge';badge.textContent=device.kind==='simulator'?'电脑模拟，非实物':'ESP8266 实物';title.appendChild(badge);
+    const detail=document.createElement('p');detail.textContent=`${device.online?'在线':'离线'} · ${labels[device.state]||'未上报'} · ${brightness.toFixed(0)}%`;
+    const saved=document.createElement('small');saved.textContent=`版本 ${device.ack_version??'—'} · ${device.saved?'已保存':'待保存'}${device.last_error?' · '+device.last_error:''}`;
+    info.append(title,detail,saved);row.append(led,info);list.append(row);
+  }
+  $('activePlan').textContent=current.enabled?`计划 v${current.version}\n开始渐亮：${formatTime(current.ramp_start_ms)}\n起床：${formatTime(current.wake_at_ms)}\n结束：${formatTime(current.hold_until_ms)}`:`当前无启用计划（版本 ${current.version}）。`;
+}
+async function refresh(){if(!accessToken)return;try{render(await api('/api/v1/state'));$('loginPanel').hidden=true;}catch(e){message(e.message,true);}}
+async function savePlan(quick=false){
+  if(busy)return;busy=true;
+  try{
+    const wake=quick?new Date(Date.now()+30000):new Date($('wake').value);
+    if(!Number.isFinite(wake.getTime()))throw new Error('请选择有效日期和时间。');
+    const payload={request_id:'web_'+Date.now()+'_'+Math.random().toString(36).slice(2),wake_at:wake.toISOString(),ramp_seconds:quick?20:Number($('ramp').value),hold_seconds:quick?10:Number($('hold').value),peak_percent:Number($('peak').value)};
+    const update=current&&current.enabled;
+    const response=await api(update?'/api/v1/wake-plans/'+current.plan_id:'/api/v1/wake-plans',{method:update?'PATCH':'POST',body:JSON.stringify(payload)});
+    formDirty=false;
+    message(`后台已接收版本 ${response.version}，请查看每个设备的保存确认。`);
+    await refresh();
+  }catch(e){message(e.message,true);}finally{busy=false;}
+}
+$('connect').onclick=async()=>{accessToken=$('token').value.trim();try{render(await api('/api/v1/state'));sessionStorage.setItem('lamp-token',accessToken);$('loginPanel').hidden=true;message('已连接。可以先点击“30 秒快速演示”。');}catch(e){message(e.message,true);}};
+$('planForm').onsubmit=e=>{e.preventDefault();savePlan();};
+$('planForm').oninput=()=>{formDirty=true;};
+$('quick').onclick=()=>savePlan(true);
+$('cancel').onclick=async()=>{if(busy)return;busy=true;try{if(!current||!current.plan_id)throw new Error('当前没有可取消的计划。');await api('/api/v1/wake-plans/'+current.plan_id,{method:'DELETE'});message('已下发取消；设备确认前，离线设备仍可能执行旧计划。');await refresh();}catch(e){message(e.message,true);}finally{busy=false;}};
+$('wake').value=localField(new Date(Date.now()+120000));
+setInterval(refresh,1000);refresh();
+</script></body></html>

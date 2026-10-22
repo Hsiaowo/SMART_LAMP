@@ -1,0 +1,11 @@
+.venv/
+.pio-core/
+firmware/.pio/
+firmware/include/config.h
+config.local.json
+data/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.env
+
